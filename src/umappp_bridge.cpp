@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "knncolle/knncolle.hpp"
 #include "umappp/umappp.hpp"
@@ -340,6 +341,156 @@ int umappp_run_reference(
         return -1;
     } catch (...) {
         set_error("unknown exception during umappp_run_reference");
+        return -1;
+    }
+
+    return 0;
+}
+
+int umappp_fit_rowmajor(
+    const double* data_rowmajor,
+    size_t data_dim,
+    int32_t num_obs,
+    size_t num_dim,
+    const UmapppOptions* options,
+    double* embedding_rowmajor)
+{
+    clear_error();
+    if (!data_rowmajor || !embedding_rowmajor) {
+        set_error("data or embedding pointer is null");
+        return -1;
+    }
+    if (!options) {
+        set_error("options pointer is null");
+        return -1;
+    }
+    if (data_dim == 0 || num_dim == 0) {
+        set_error("data_dim and num_dim must be positive");
+        return -1;
+    }
+    if (num_obs <= 0) {
+        set_error("num_obs must be positive");
+        return -1;
+    }
+
+    umappp::Options opt;
+    if (!fill_options(*options, &opt)) {
+        return -1;
+    }
+
+    try {
+        const size_t nobs = static_cast<size_t>(num_obs);
+
+        // Convert row-major (nobs x data_dim) to column-major (data_dim x nobs)
+        std::vector<double> data_colmajor(data_dim * nobs);
+        for (size_t i = 0; i < nobs; ++i) {
+            for (size_t d = 0; d < data_dim; ++d) {
+                data_colmajor[d + data_dim * i] = data_rowmajor[i * data_dim + d];
+            }
+        }
+
+        // umappp expects column-major embedding: (num_dim rows, nobs cols)
+        std::vector<double> embedding_colmajor(num_dim * nobs);
+
+        auto distance = std::make_shared<knncolle::EuclideanDistance<double, double> >();
+        auto builder = knncolle::VptreeBuilder<int, double, double>(distance);
+        auto status = umappp::initialize(
+            data_dim,
+            static_cast<int>(num_obs),
+            data_colmajor.data(),
+            builder,
+            num_dim,
+            embedding_colmajor.data(),
+            opt
+        );
+        status.run(embedding_colmajor.data());
+
+        // Convert embedding to row-major (nobs x num_dim)
+        for (size_t i = 0; i < nobs; ++i) {
+            for (size_t d = 0; d < num_dim; ++d) {
+                embedding_rowmajor[i * num_dim + d] = embedding_colmajor[d + num_dim * i];
+            }
+        }
+
+    } catch (const std::exception& e) {
+        set_error(e.what());
+        return -1;
+    } catch (...) {
+        set_error("unknown exception during umappp_fit_rowmajor");
+        return -1;
+    }
+
+    return 0;
+}
+
+int umappp_fit_from_knn(
+    const uint32_t* indices,
+    const double* distances,
+    size_t k,
+    int32_t num_obs,
+    size_t num_dim,
+    const UmapppOptions* options,
+    double* embedding_rowmajor)
+{
+    clear_error();
+    if (!indices || !distances || !embedding_rowmajor) {
+        set_error("indices/distances/embedding pointer is null");
+        return -1;
+    }
+    if (!options) {
+        set_error("options pointer is null");
+        return -1;
+    }
+    if (k == 0 || num_dim == 0) {
+        set_error("k and num_dim must be positive");
+        return -1;
+    }
+    if (num_obs <= 0) {
+        set_error("num_obs must be positive");
+        return -1;
+    }
+
+    umappp::Options opt;
+    if (!fill_options(*options, &opt)) {
+        return -1;
+    }
+
+    try {
+        const size_t nobs = static_cast<size_t>(num_obs);
+
+        umappp::NeighborList<uint32_t, double> nl;
+        nl.resize(nobs);
+        for (size_t i = 0; i < nobs; ++i) {
+            auto& row = nl[i];
+            row.reserve(k);
+            const size_t base = i * k;
+            for (size_t j = 0; j < k; ++j) {
+                const uint32_t idx = indices[base + j];
+                const double dist = distances[base + j];
+                if (idx == static_cast<uint32_t>(i)) {
+                    continue;
+                }
+                row.emplace_back(idx, dist);
+            }
+        }
+
+        // umappp expects column-major embedding: (num_dim rows, nobs cols)
+        std::vector<double> embedding_colmajor(num_dim * nobs);
+        auto status = umappp::initialize(std::move(nl), num_dim, embedding_colmajor.data(), opt);
+        status.run(embedding_colmajor.data());
+
+        // Convert embedding to row-major (nobs x num_dim)
+        for (size_t i = 0; i < nobs; ++i) {
+            for (size_t d = 0; d < num_dim; ++d) {
+                embedding_rowmajor[i * num_dim + d] = embedding_colmajor[d + num_dim * i];
+            }
+        }
+
+    } catch (const std::exception& e) {
+        set_error(e.what());
+        return -1;
+    } catch (...) {
+        set_error("unknown exception during umappp_fit_from_knn");
         return -1;
     }
 

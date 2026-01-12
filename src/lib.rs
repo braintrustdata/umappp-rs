@@ -281,6 +281,100 @@ pub fn fit(
     Ok(embedding)
 }
 
+pub fn fit_rowmajor(
+    data_dim: usize,
+    num_obs: usize,
+    data_rowmajor: &[f64],
+    num_dim: usize,
+    options: &UmapOptions,
+) -> Result<Vec<f64>> {
+    if data_dim == 0 || num_dim == 0 {
+        return Err(UmapError::InvalidInput(
+            "data_dim and num_dim must be positive",
+        ));
+    }
+    if num_obs == 0 {
+        return Err(UmapError::InvalidInput("num_obs must be positive"));
+    }
+    let num_obs_i32 =
+        i32::try_from(num_obs).map_err(|_| UmapError::InvalidInput("num_obs too large"))?;
+    let data_len = data_dim
+        .checked_mul(num_obs)
+        .ok_or(UmapError::InvalidInput("data size overflow"))?;
+    if data_rowmajor.len() != data_len {
+        return Err(UmapError::InvalidInput("data length mismatch"));
+    }
+
+    let embed_len = num_dim
+        .checked_mul(num_obs)
+        .ok_or(UmapError::InvalidInput("embedding size overflow"))?;
+    let mut embedding_rowmajor = vec![0.0f64; embed_len];
+
+    let raw = options.to_raw();
+    let rc = unsafe {
+        umappp_fit_rowmajor(
+            data_rowmajor.as_ptr(),
+            data_dim,
+            num_obs_i32,
+            num_dim,
+            &raw,
+            embedding_rowmajor.as_mut_ptr(),
+        )
+    };
+    if rc != 0 {
+        return Err(UmapError::Ffi(take_last_error()));
+    }
+    Ok(embedding_rowmajor)
+}
+
+pub fn fit_from_knn(
+    num_obs: usize,
+    k: usize,
+    indices: &[u32],
+    distances: &[f64],
+    num_dim: usize,
+    options: &UmapOptions,
+) -> Result<Vec<f64>> {
+    if num_dim == 0 || k == 0 {
+        return Err(UmapError::InvalidInput("num_dim and k must be positive"));
+    }
+    if num_obs == 0 {
+        return Err(UmapError::InvalidInput("num_obs must be positive"));
+    }
+    let num_obs_i32 =
+        i32::try_from(num_obs).map_err(|_| UmapError::InvalidInput("num_obs too large"))?;
+    let expected = num_obs
+        .checked_mul(k)
+        .ok_or(UmapError::InvalidInput("knn size overflow"))?;
+    if indices.len() != expected || distances.len() != expected {
+        return Err(UmapError::InvalidInput(
+            "knn indices/distances length mismatch",
+        ));
+    }
+
+    let embed_len = num_dim
+        .checked_mul(num_obs)
+        .ok_or(UmapError::InvalidInput("embedding size overflow"))?;
+    let mut embedding_rowmajor = vec![0.0f64; embed_len];
+
+    let raw = options.to_raw();
+    let rc = unsafe {
+        umappp_fit_from_knn(
+            indices.as_ptr(),
+            distances.as_ptr(),
+            k,
+            num_obs_i32,
+            num_dim,
+            &raw,
+            embedding_rowmajor.as_mut_ptr(),
+        )
+    };
+    if rc != 0 {
+        return Err(UmapError::Ffi(take_last_error()));
+    }
+    Ok(embedding_rowmajor)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct RawOptions {
@@ -328,6 +422,23 @@ unsafe extern "C" {
     fn umappp_status_free(status: *mut c_void);
     fn umappp_last_error() -> *const c_char;
     fn umappp_clear_last_error();
+    fn umappp_fit_rowmajor(
+        data_rowmajor: *const f64,
+        data_dim: usize,
+        num_obs: i32,
+        num_dim: usize,
+        options: *const RawOptions,
+        embedding_rowmajor: *mut f64,
+    ) -> c_int;
+    fn umappp_fit_from_knn(
+        indices: *const u32,
+        distances: *const f64,
+        k: usize,
+        num_obs: i32,
+        num_dim: usize,
+        options: *const RawOptions,
+        embedding_rowmajor: *mut f64,
+    ) -> c_int;
 }
 
 fn take_last_error() -> String {

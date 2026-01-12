@@ -65,6 +65,29 @@ int umappp_run_reference(
     const UmapppOptions* options,
     double* embedding);
 
+// Fit UMAP, accepting input in row-major layout (num_obs x data_dim) and producing
+// output in row-major layout (num_obs x num_dim).
+int umappp_fit_rowmajor(
+    const double* data_rowmajor,
+    size_t data_dim,
+    int32_t num_obs,
+    size_t num_dim,
+    const UmapppOptions* options,
+    double* embedding_rowmajor);
+
+// Fit UMAP using a precomputed kNN graph.
+//
+// - indices/distances are shaped (num_obs, k) in row-major order.
+// - embedding_rowmajor is shaped (num_obs, num_dim) in row-major order.
+int umappp_fit_from_knn(
+    const uint32_t* indices,
+    const double* distances,
+    size_t k,
+    int32_t num_obs,
+    size_t num_dim,
+    const UmapppOptions* options,
+    double* embedding_rowmajor);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
