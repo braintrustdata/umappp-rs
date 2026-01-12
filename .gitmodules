@@ -1,0 +1,21 @@
+[submodule "vendor/umappp"]
+	path = vendor/umappp
+	url = https://github.com/libscran/umappp
+[submodule "vendor/aarand"]
+	path = vendor/aarand
+	url = https://github.com/LTLA/aarand
+[submodule "vendor/subpar"]
+	path = vendor/subpar
+	url = https://github.com/LTLA/subpar
+[submodule "vendor/sanisizer"]
+	path = vendor/sanisizer
+	url = https://github.com/LTLA/sanisizer
+[submodule "vendor/knncolle"]
+	path = vendor/knncolle
+	url = https://github.com/knncolle/knncolle
+[submodule "vendor/irlba"]
+	path = vendor/irlba
+	url = https://github.com/LTLA/CppIrlba
+[submodule "vendor/eigen"]
+	path = vendor/eigen
+	url = https://gitlab.com/libeigen/eigen
