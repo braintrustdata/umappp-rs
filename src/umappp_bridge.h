@@ -88,6 +88,23 @@ int umappp_fit_from_knn(
     const UmapppOptions* options,
     double* embedding_rowmajor);
 
+// Transform new points into an existing embedding using a precomputed kNN graph.
+//
+// - indices/distances are shaped (num_new, k) in row-major order, with indices
+//   referring to rows in the training embedding.
+// - train_embedding_rowmajor is shaped (num_train, num_dim) in row-major order.
+// - embedding_rowmajor is shaped (num_new, num_dim) in row-major order.
+int umappp_transform_from_knn(
+    const uint32_t* indices,
+    const double* distances,
+    size_t k,
+    int32_t num_new,
+    int32_t num_train,
+    size_t num_dim,
+    const double* train_embedding_rowmajor,
+    const UmapppOptions* options,
+    double* embedding_rowmajor);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

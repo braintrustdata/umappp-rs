@@ -8,6 +8,8 @@
 #include <vector>
 
 #include "knncolle/knncolle.hpp"
+#include "umappp/neighbor_similarities.hpp"
+#include "umappp/optimize_layout.hpp"
 #include "umappp/umappp.hpp"
 
 namespace {
@@ -99,6 +101,69 @@ bool fill_options(const UmapppOptions& src, umappp::Options* dst) {
 
     *dst = std::move(opt);
     return true;
+}
+
+template<typename Index_, typename Float_, class Rng_>
+void optimize_layout_transform(
+    std::size_t num_dim,
+    Float_* new_embedding,
+    const Float_* train_embedding,
+    Index_ num_train,
+    umappp::EpochData<Index_, Float_>& setup,
+    Float_ a,
+    Float_ b,
+    Float_ gamma,
+    Float_ initial_alpha,
+    Rng_& rng,
+    int epoch_limit)
+{
+    auto& n = setup.current_epoch;
+    const auto num_epochs = setup.total_epochs;
+
+    for (; n < epoch_limit; ++n) {
+        const Float_ epoch = n;
+        const Float_ alpha = initial_alpha * (1.0 - epoch / num_epochs);
+
+        const Index_ num_new = setup.cumulative_num_edges.size() - 1;
+        for (Index_ i = 0; i < num_new; ++i) {
+            const auto start = setup.cumulative_num_edges[i], end = setup.cumulative_num_edges[i + 1];
+            auto left = new_embedding + sanisizer::product_unsafe<std::size_t>(i, num_dim);
+
+            for (auto j = start; j < end; ++j) {
+                if (setup.epoch_of_next_sample[j] > epoch) {
+                    continue;
+                }
+
+                {
+                    const auto right = train_embedding + sanisizer::product_unsafe<std::size_t>(setup.edge_targets[j], num_dim);
+                    const Float_ dist2 = umappp::quick_squared_distance(left, right, num_dim);
+                    const Float_ pd2b = std::pow(dist2, b);
+                    const Float_ grad_coef = (-2 * a * b * pd2b) / (dist2 * (a * pd2b + 1.0));
+
+                    for (std::size_t d = 0; d < num_dim; ++d) {
+                        left[d] += alpha * umappp::clamp(grad_coef * (left[d] - right[d]));
+                    }
+                }
+
+                const Float_ epochs_per_negative_sample = setup.epochs_per_sample[j] / setup.negative_sample_rate;
+                const int num_neg_samples = (epoch - setup.epoch_of_next_negative_sample[j]) / epochs_per_negative_sample;
+
+                for (int p = 0; p < num_neg_samples; ++p) {
+                    const auto sampled = aarand::discrete_uniform(rng, num_train);
+                    const auto right = train_embedding + sanisizer::product_unsafe<std::size_t>(sampled, num_dim);
+                    const Float_ dist2 = umappp::quick_squared_distance(left, right, num_dim);
+                    const Float_ grad_coef = 2 * gamma * b / ((0.001 + dist2) * (a * std::pow(dist2, b) + 1.0));
+
+                    for (std::size_t d = 0; d < num_dim; ++d) {
+                        left[d] += alpha * umappp::clamp(grad_coef * (left[d] - right[d]));
+                    }
+                }
+
+                setup.epoch_of_next_sample[j] += setup.epochs_per_sample[j];
+                setup.epoch_of_next_negative_sample[j] += num_neg_samples * epochs_per_negative_sample;
+            }
+        }
+    }
 }
 
 } // namespace
@@ -495,6 +560,121 @@ int umappp_fit_from_knn(
     }
 
     return 0;
+}
+
+int umappp_transform_from_knn(
+    const uint32_t* indices,
+    const double* distances,
+    size_t k,
+    int32_t num_new,
+    int32_t num_train,
+    size_t num_dim,
+    const double* train_embedding_rowmajor,
+    const UmapppOptions* options,
+    double* embedding_rowmajor)
+{
+    clear_error();
+    if (!indices || !distances || !train_embedding_rowmajor || !embedding_rowmajor) {
+        set_error("input pointer is null");
+        return -1;
+    }
+    if (!options) {
+        set_error("options pointer is null");
+        return -1;
+    }
+    if (num_new <= 0 || num_train <= 0) {
+        set_error("num_new and num_train must be positive");
+        return -1;
+    }
+    if (num_dim == 0 || k == 0) {
+        set_error("num_dim and k must be positive");
+        return -1;
+    }
+
+    umappp::Options opt;
+    if (!fill_options(*options, &opt)) {
+        return -1;
+    }
+
+    try {
+        umappp::NeighborList<int, double> neighbors(num_new);
+        for (int i = 0; i < num_new; ++i) {
+            auto& current = neighbors[i];
+            current.reserve(k);
+            const std::size_t offset = static_cast<std::size_t>(i) * k;
+            for (std::size_t j = 0; j < k; ++j) {
+                const auto idx = indices[offset + j];
+                if (idx >= static_cast<uint32_t>(num_train)) {
+                    set_error("knn index out of range for training embedding");
+                    return -1;
+                }
+                current.emplace_back(static_cast<int>(idx), distances[offset + j]);
+            }
+        }
+
+        umappp::NeighborSimilaritiesOptions<double> nsopt;
+        nsopt.local_connectivity = opt.local_connectivity;
+        nsopt.bandwidth = opt.bandwidth;
+        nsopt.num_threads = opt.num_threads;
+        umappp::neighbor_similarities(neighbors, nsopt);
+
+        // Initialize new embeddings as weighted averages of neighbor embeddings.
+        for (int i = 0; i < num_new; ++i) {
+            const auto& current = neighbors[i];
+            double total = 0.0;
+            for (const auto& entry : current) {
+                total += entry.second;
+            }
+
+            auto out = embedding_rowmajor + static_cast<std::size_t>(i) * num_dim;
+            if (total <= 0 && !current.empty()) {
+                const auto src = train_embedding_rowmajor + static_cast<std::size_t>(current.front().first) * num_dim;
+                std::copy_n(src, num_dim, out);
+            } else {
+                std::fill_n(out, num_dim, 0.0);
+                if (total > 0) {
+                    for (const auto& entry : current) {
+                        const auto src = train_embedding_rowmajor + static_cast<std::size_t>(entry.first) * num_dim;
+                        const double weight = entry.second / total;
+                        for (std::size_t d = 0; d < num_dim; ++d) {
+                            out[d] += weight * src[d];
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!opt.a.has_value() || !opt.b.has_value()) {
+            const auto found = umappp::find_ab(opt.spread, opt.min_dist);
+            opt.a = found.first;
+            opt.b = found.second;
+        }
+
+        const int epochs = umappp::choose_num_epochs<int>(opt.num_epochs, num_new);
+        auto epoch_data = umappp::similarities_to_epochs(neighbors, epochs, opt.negative_sample_rate);
+        umappp::RngEngine rng(opt.optimize_seed);
+
+        optimize_layout_transform<int, double>(
+            num_dim,
+            embedding_rowmajor,
+            train_embedding_rowmajor,
+            num_train,
+            epoch_data,
+            *(opt.a),
+            *(opt.b),
+            opt.repulsion_strength,
+            opt.learning_rate,
+            rng,
+            epoch_data.total_epochs
+        );
+        return 0;
+    } catch (const std::exception& e) {
+        set_error(e.what());
+    } catch (...) {
+        set_error("unknown exception during umappp_transform_from_knn");
+    }
+
+    return -1;
 }
 
 } // extern "C"
