@@ -34,6 +34,7 @@ struct UmapppOptions {
     uint64_t optimize_seed;
     int32_t num_threads;
     uint8_t parallel_optimization;
+    uint8_t parallel_optimization_fast;
 };
 
 void umappp_default_options(UmapppOptions* out);

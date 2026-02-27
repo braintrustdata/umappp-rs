@@ -73,6 +73,7 @@ pub struct UmapOptions {
     pub optimize_seed: u64,
     pub num_threads: i32,
     pub parallel_optimization: bool,
+    pub parallel_optimization_fast: bool,
 }
 
 impl Default for UmapOptions {
@@ -115,6 +116,7 @@ impl UmapOptions {
             optimize_seed: raw.optimize_seed,
             num_threads: raw.num_threads,
             parallel_optimization: raw.parallel_optimization != 0,
+            parallel_optimization_fast: raw.parallel_optimization_fast != 0,
         }
     }
 
@@ -153,6 +155,11 @@ impl UmapOptions {
             optimize_seed: self.optimize_seed,
             num_threads: self.num_threads,
             parallel_optimization: if self.parallel_optimization { 1 } else { 0 },
+            parallel_optimization_fast: if self.parallel_optimization_fast {
+                1
+            } else {
+                0
+            },
         }
     }
 }
@@ -527,6 +534,7 @@ struct RawOptions {
     optimize_seed: u64,
     num_threads: i32,
     parallel_optimization: u8,
+    parallel_optimization_fast: u8,
 }
 
 unsafe extern "C" {
@@ -638,6 +646,7 @@ mod tests {
         options.num_neighbors = 10;
         options.num_threads = 1;
         options.parallel_optimization = false;
+        options.parallel_optimization_fast = false;
         options
     }
 
@@ -855,6 +864,33 @@ mod tests {
             f64_overlap,
             f32_overlap
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn fit_from_knn_f32_parallel_fast_runs() -> Result<()> {
+        let data_dim = 6;
+        let num_obs = 64;
+        let num_dim = 3;
+        let k = 10;
+        let data = make_data(data_dim, num_obs);
+        let mut options = test_options();
+        options.num_threads = 4;
+        options.parallel_optimization = true;
+        options.parallel_optimization_fast = true;
+
+        let (indices, distances_f64) = build_knn_rowmajor(&data, data_dim, num_obs, k);
+        let distances_f32 = distances_f64.iter().map(|v| *v as f32).collect::<Vec<_>>();
+        let embedding = fit_from_knn_f32(num_obs, k, &indices, &distances_f32, num_dim, &options)?;
+
+        assert_eq!(embedding.len(), num_obs * num_dim);
+        for value in embedding {
+            assert!(
+                value.is_finite(),
+                "non-finite value in fast parallel embedding"
+            );
+        }
 
         Ok(())
     }

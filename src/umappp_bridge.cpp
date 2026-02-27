@@ -98,6 +98,7 @@ bool fill_options(const UmapppOptions& src, umappp::Options* dst) {
     opt.optimize_seed = src.optimize_seed;
     opt.num_threads = src.num_threads;
     opt.parallel_optimization = (src.parallel_optimization != 0);
+    opt.parallel_optimization_fast = (src.parallel_optimization_fast != 0);
 
     *dst = std::move(opt);
     return true;
@@ -151,7 +152,7 @@ void optimize_layout_transform(
                     }
                 }
 
-                const Float_ epochs_per_negative_sample = setup.epochs_per_negative_sample[j];
+                const Float_ epochs_per_negative_sample = setup.epochs_per_sample[j] / setup.negative_sample_rate;
                 const int num_neg_samples = (epoch - setup.epoch_of_next_negative_sample[j]) / epochs_per_negative_sample;
 
                 for (int p = 0; p < num_neg_samples; ++p) {
@@ -209,6 +210,7 @@ void umappp_default_options(UmapppOptions* out) {
     out->optimize_seed = opt.optimize_seed;
     out->num_threads = opt.num_threads;
     out->parallel_optimization = opt.parallel_optimization ? 1 : 0;
+    out->parallel_optimization_fast = opt.parallel_optimization_fast ? 1 : 0;
 }
 
 void* umappp_initialize(

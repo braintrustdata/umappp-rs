@@ -1,6 +1,7 @@
 [submodule "vendor/umappp"]
 	path = vendor/umappp
-	url = https://github.com/libscran/umappp
+	url = https://github.com/braintrustdata/umappp
+	branch = braintrust/parallel-opt-fast
 [submodule "vendor/aarand"]
 	path = vendor/aarand
 	url = https://github.com/LTLA/aarand
