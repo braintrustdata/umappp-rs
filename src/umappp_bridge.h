@@ -88,6 +88,16 @@ int umappp_fit_from_knn(
     const UmapppOptions* options,
     double* embedding_rowmajor);
 
+// Float32 variant of fit_from_knn to reduce memory traffic in optimization-heavy paths.
+int umappp_fit_from_knn_f32(
+    const uint32_t* indices,
+    const float* distances,
+    size_t k,
+    int32_t num_obs,
+    size_t num_dim,
+    const UmapppOptions* options,
+    float* embedding_rowmajor);
+
 // Transform new points into an existing embedding using a precomputed kNN graph.
 //
 // - indices/distances are shaped (num_new, k) in row-major order, with indices

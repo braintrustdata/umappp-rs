@@ -119,10 +119,16 @@ void optimize_layout_transform(
 {
     auto& n = setup.current_epoch;
     const auto num_epochs = setup.total_epochs;
+    const Float_ one = static_cast<Float_>(1);
+    const Float_ two = static_cast<Float_>(2);
+    const Float_ repulsive_distance_offset = static_cast<Float_>(0.001);
+    const Float_ attractive_constant = -two * a * b;
+    const Float_ repulsive_constant = two * gamma * b;
+    const Float_ inv_num_epochs = one / static_cast<Float_>(num_epochs);
 
     for (; n < epoch_limit; ++n) {
         const Float_ epoch = n;
-        const Float_ alpha = initial_alpha * (1.0 - epoch / num_epochs);
+        const Float_ alpha = initial_alpha * (one - epoch * inv_num_epochs);
 
         const Index_ num_new = setup.cumulative_num_edges.size() - 1;
         for (Index_ i = 0; i < num_new; ++i) {
@@ -138,21 +144,21 @@ void optimize_layout_transform(
                     const auto right = train_embedding + sanisizer::product_unsafe<std::size_t>(setup.edge_targets[j], num_dim);
                     const Float_ dist2 = umappp::quick_squared_distance(left, right, num_dim);
                     const Float_ pd2b = std::pow(dist2, b);
-                    const Float_ grad_coef = (-2 * a * b * pd2b) / (dist2 * (a * pd2b + 1.0));
+                    const Float_ grad_coef = (attractive_constant * pd2b) / (dist2 * (a * pd2b + one));
 
                     for (std::size_t d = 0; d < num_dim; ++d) {
                         left[d] += alpha * umappp::clamp(grad_coef * (left[d] - right[d]));
                     }
                 }
 
-                const Float_ epochs_per_negative_sample = setup.epochs_per_sample[j] / setup.negative_sample_rate;
+                const Float_ epochs_per_negative_sample = setup.epochs_per_negative_sample[j];
                 const int num_neg_samples = (epoch - setup.epoch_of_next_negative_sample[j]) / epochs_per_negative_sample;
 
                 for (int p = 0; p < num_neg_samples; ++p) {
                     const auto sampled = aarand::discrete_uniform(rng, num_train);
                     const auto right = train_embedding + sanisizer::product_unsafe<std::size_t>(sampled, num_dim);
                     const Float_ dist2 = umappp::quick_squared_distance(left, right, num_dim);
-                    const Float_ grad_coef = 2 * gamma * b / ((0.001 + dist2) * (a * std::pow(dist2, b) + 1.0));
+                    const Float_ grad_coef = repulsive_constant / ((repulsive_distance_offset + dist2) * (a * std::pow(dist2, b) + one));
 
                     for (std::size_t d = 0; d < num_dim; ++d) {
                         left[d] += alpha * umappp::clamp(grad_coef * (left[d] - right[d]));
@@ -556,6 +562,80 @@ int umappp_fit_from_knn(
         return -1;
     } catch (...) {
         set_error("unknown exception during umappp_fit_from_knn");
+        return -1;
+    }
+
+    return 0;
+}
+
+int umappp_fit_from_knn_f32(
+    const uint32_t* indices,
+    const float* distances,
+    size_t k,
+    int32_t num_obs,
+    size_t num_dim,
+    const UmapppOptions* options,
+    float* embedding_rowmajor)
+{
+    clear_error();
+    if (!indices || !distances || !embedding_rowmajor) {
+        set_error("indices/distances/embedding pointer is null");
+        return -1;
+    }
+    if (!options) {
+        set_error("options pointer is null");
+        return -1;
+    }
+    if (k == 0 || num_dim == 0) {
+        set_error("k and num_dim must be positive");
+        return -1;
+    }
+    if (num_obs <= 0) {
+        set_error("num_obs must be positive");
+        return -1;
+    }
+
+    umappp::Options opt;
+    if (!fill_options(*options, &opt)) {
+        return -1;
+    }
+
+    try {
+        const size_t nobs = static_cast<size_t>(num_obs);
+
+        umappp::NeighborList<uint32_t, float> nl;
+        nl.resize(nobs);
+        for (size_t i = 0; i < nobs; ++i) {
+            auto& row = nl[i];
+            row.reserve(k);
+            const size_t base = i * k;
+            for (size_t j = 0; j < k; ++j) {
+                const uint32_t idx = indices[base + j];
+                const float dist = distances[base + j];
+                if (idx == static_cast<uint32_t>(i)) {
+                    continue;
+                }
+                row.emplace_back(idx, dist);
+            }
+        }
+
+        // umappp expects column-major embedding: (num_dim rows, nobs cols)
+        std::vector<float> embedding_colmajor(num_dim * nobs);
+        auto status = umappp::initialize(std::move(nl), num_dim, embedding_colmajor.data(), opt);
+        status.run(embedding_colmajor.data());
+
+        // Convert embedding to row-major (nobs x num_dim)
+        for (size_t i = 0; i < nobs; ++i) {
+            for (size_t d = 0; d < num_dim; ++d) {
+                embedding_rowmajor[i * num_dim + d] = embedding_colmajor[d + num_dim * i];
+            }
+        }
+
+    } catch (const std::exception& e) {
+        set_error(e.what());
+        return -1;
+    } catch (...) {
+        set_error("unknown exception during umappp_fit_from_knn_f32");
         return -1;
     }
 

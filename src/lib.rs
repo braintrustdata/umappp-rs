@@ -137,7 +137,11 @@ impl UmapOptions {
                 0
             },
             initialize_spectral_scale: self.initialize_spectral_scale,
-            initialize_spectral_jitter: if self.initialize_spectral_jitter { 1 } else { 0 },
+            initialize_spectral_jitter: if self.initialize_spectral_jitter {
+                1
+            } else {
+                0
+            },
             initialize_spectral_jitter_sd: self.initialize_spectral_jitter_sd,
             initialize_random_scale: self.initialize_random_scale,
             initialize_seed: self.initialize_seed,
@@ -164,7 +168,9 @@ impl UmapStatus {
         self.ensure_embedding_len(embedding)?;
         let rc = unsafe {
             match epoch_limit {
-                Some(limit) => umappp_status_run(self.handle.as_ptr(), embedding.as_mut_ptr(), limit),
+                Some(limit) => {
+                    umappp_status_run(self.handle.as_ptr(), embedding.as_mut_ptr(), limit)
+                }
                 None => umappp_status_run_full(self.handle.as_ptr(), embedding.as_mut_ptr()),
             }
         };
@@ -227,7 +233,9 @@ pub fn initialize(
     options: &UmapOptions,
 ) -> Result<UmapStatus> {
     if data_dim == 0 || num_dim == 0 {
-        return Err(UmapError::InvalidInput("data_dim and num_dim must be positive"));
+        return Err(UmapError::InvalidInput(
+            "data_dim and num_dim must be positive",
+        ));
     }
     if num_obs == 0 {
         return Err(UmapError::InvalidInput("num_obs must be positive"));
@@ -273,9 +281,12 @@ pub fn fit(
     num_dim: usize,
     options: &UmapOptions,
 ) -> Result<Vec<f64>> {
-    let mut embedding = vec![0.0; num_dim.checked_mul(num_obs).ok_or_else(|| {
-        UmapError::InvalidInput("embedding size overflow")
-    })?];
+    let mut embedding = vec![
+        0.0;
+        num_dim.checked_mul(num_obs).ok_or_else(|| {
+            UmapError::InvalidInput("embedding size overflow")
+        })?
+    ];
     let mut status = initialize(data_dim, num_obs, data, num_dim, &mut embedding, options)?;
     status.run(&mut embedding, None)?;
     Ok(embedding)
@@ -375,6 +386,54 @@ pub fn fit_from_knn(
     Ok(embedding_rowmajor)
 }
 
+pub fn fit_from_knn_f32(
+    num_obs: usize,
+    k: usize,
+    indices: &[u32],
+    distances: &[f32],
+    num_dim: usize,
+    options: &UmapOptions,
+) -> Result<Vec<f32>> {
+    if num_dim == 0 || k == 0 {
+        return Err(UmapError::InvalidInput("num_dim and k must be positive"));
+    }
+    if num_obs == 0 {
+        return Err(UmapError::InvalidInput("num_obs must be positive"));
+    }
+    let num_obs_i32 =
+        i32::try_from(num_obs).map_err(|_| UmapError::InvalidInput("num_obs too large"))?;
+    let expected = num_obs
+        .checked_mul(k)
+        .ok_or(UmapError::InvalidInput("knn size overflow"))?;
+    if indices.len() != expected || distances.len() != expected {
+        return Err(UmapError::InvalidInput(
+            "knn indices/distances length mismatch",
+        ));
+    }
+
+    let embed_len = num_dim
+        .checked_mul(num_obs)
+        .ok_or(UmapError::InvalidInput("embedding size overflow"))?;
+    let mut embedding_rowmajor = vec![0.0f32; embed_len];
+
+    let raw = options.to_raw();
+    let rc = unsafe {
+        umappp_fit_from_knn_f32(
+            indices.as_ptr(),
+            distances.as_ptr(),
+            k,
+            num_obs_i32,
+            num_dim,
+            &raw,
+            embedding_rowmajor.as_mut_ptr(),
+        )
+    };
+    if rc != 0 {
+        return Err(UmapError::Ffi(take_last_error()));
+    }
+    Ok(embedding_rowmajor)
+}
+
 pub fn transform_from_knn(
     num_train: usize,
     num_obs: usize,
@@ -411,9 +470,7 @@ pub fn transform_from_knn(
         .checked_mul(num_dim)
         .ok_or(UmapError::InvalidInput("train embedding size overflow"))?;
     if train_embedding_rowmajor.len() != train_len {
-        return Err(UmapError::InvalidInput(
-            "train embedding length mismatch",
-        ));
+        return Err(UmapError::InvalidInput("train embedding length mismatch"));
     }
 
     let embed_len = num_dim
@@ -506,6 +563,15 @@ unsafe extern "C" {
         options: *const RawOptions,
         embedding_rowmajor: *mut f64,
     ) -> c_int;
+    fn umappp_fit_from_knn_f32(
+        indices: *const u32,
+        distances: *const f32,
+        k: usize,
+        num_obs: i32,
+        num_dim: usize,
+        options: *const RawOptions,
+        embedding_rowmajor: *mut f32,
+    ) -> c_int;
     fn umappp_transform_from_knn(
         indices: *const u32,
         distances: *const f64,
@@ -573,6 +639,94 @@ mod tests {
         options.num_threads = 1;
         options.parallel_optimization = false;
         options
+    }
+
+    fn build_knn_rowmajor(
+        data_colmajor: &[f64],
+        data_dim: usize,
+        num_obs: usize,
+        k: usize,
+    ) -> (Vec<u32>, Vec<f64>) {
+        let mut indices = vec![0u32; num_obs * k];
+        let mut distances = vec![0.0f64; num_obs * k];
+
+        for i in 0..num_obs {
+            let mut dists = Vec::with_capacity(num_obs.saturating_sub(1));
+            for j in 0..num_obs {
+                if i == j {
+                    continue;
+                }
+                let mut sum = 0.0f64;
+                for d in 0..data_dim {
+                    let left = data_colmajor[d + i * data_dim];
+                    let right = data_colmajor[d + j * data_dim];
+                    let delta = left - right;
+                    sum += delta * delta;
+                }
+                dists.push((j as u32, sum.sqrt()));
+            }
+            dists.sort_by(|a, b| a.1.partial_cmp(&b.1).expect("invalid distance ordering"));
+            for (offset, (j, dist)) in dists.into_iter().take(k).enumerate() {
+                let out = i * k + offset;
+                indices[out] = j;
+                distances[out] = dist;
+            }
+        }
+
+        (indices, distances)
+    }
+
+    fn lowdim_knn_rowmajor(
+        embedding: &[f64],
+        num_dim: usize,
+        num_obs: usize,
+        k: usize,
+    ) -> Vec<Vec<usize>> {
+        let mut out = vec![vec![0usize; k]; num_obs];
+        for i in 0..num_obs {
+            let mut dists = Vec::with_capacity(num_obs.saturating_sub(1));
+            for j in 0..num_obs {
+                if i == j {
+                    continue;
+                }
+                let mut sum = 0.0f64;
+                for d in 0..num_dim {
+                    let left = embedding[i * num_dim + d];
+                    let right = embedding[j * num_dim + d];
+                    let delta = left - right;
+                    sum += delta * delta;
+                }
+                dists.push((j, sum));
+            }
+            dists.sort_by(|a, b| a.1.partial_cmp(&b.1).expect("invalid distance ordering"));
+            for (slot, (j, _dist)) in dists.into_iter().take(k).enumerate() {
+                out[i][slot] = j;
+            }
+        }
+        out
+    }
+
+    fn knn_overlap(reference: &[Vec<usize>], observed: &[Vec<usize>]) -> f64 {
+        assert_eq!(reference.len(), observed.len());
+        let n = reference.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let k = reference[0].len();
+        if k == 0 {
+            return 0.0;
+        }
+        let mut total = 0usize;
+        for i in 0..n {
+            let r = &reference[i];
+            let o = &observed[i];
+            for idx in o {
+                if r.contains(idx) {
+                    total += 1;
+                }
+            }
+        }
+        total as f64 / (n * k) as f64
     }
 
     #[test]
@@ -667,6 +821,42 @@ mod tests {
             "pairwise distance correlation too low: {}",
             corr
         );
+    }
+
+    #[test]
+    fn fit_from_knn_f32_tracks_f64() -> Result<()> {
+        let data_dim = 6;
+        let num_obs = 48;
+        let num_dim = 3;
+        let k = 10;
+        let data = make_data(data_dim, num_obs);
+        let options = test_options();
+
+        let (indices, distances_f64) = build_knn_rowmajor(&data, data_dim, num_obs, k);
+        let embedding_f64 = fit_from_knn(num_obs, k, &indices, &distances_f64, num_dim, &options)?;
+        let distances_f32 = distances_f64.iter().map(|v| *v as f32).collect::<Vec<_>>();
+        let embedding_f32 =
+            fit_from_knn_f32(num_obs, k, &indices, &distances_f32, num_dim, &options)?;
+
+        assert_eq!(embedding_f64.len(), embedding_f32.len());
+        let reference_knn = indices
+            .chunks(k)
+            .map(|chunk| chunk.iter().map(|idx| *idx as usize).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let f64_knn = lowdim_knn_rowmajor(&embedding_f64, num_dim, num_obs, k);
+        let embedding_f32_as_f64 = embedding_f32.iter().map(|v| *v as f64).collect::<Vec<_>>();
+        let f32_knn = lowdim_knn_rowmajor(&embedding_f32_as_f64, num_dim, num_obs, k);
+
+        let f64_overlap = knn_overlap(&reference_knn, &f64_knn);
+        let f32_overlap = knn_overlap(&reference_knn, &f32_knn);
+        assert!(
+            (f64_overlap - f32_overlap).abs() < 0.05,
+            "f32/f64 quality drift too large: f64_overlap={} f32_overlap={}",
+            f64_overlap,
+            f32_overlap
+        );
+
+        Ok(())
     }
 
     fn to_row_major(data: &[f64], data_dim: usize, num_obs: usize) -> Vec<f64> {
@@ -799,11 +989,7 @@ np.savetxt(os.environ["UMAPPP_OUT_PATH"], embedding, delimiter=",")
         assert!(status.success(), "python umap run failed");
     }
 
-    fn pairwise_distances_col_major(
-        embedding: &[f64],
-        num_dim: usize,
-        num_obs: usize,
-    ) -> Vec<f64> {
+    fn pairwise_distances_col_major(embedding: &[f64], num_dim: usize, num_obs: usize) -> Vec<f64> {
         let mut distances = Vec::new();
         for i in 0..num_obs {
             for j in (i + 1)..num_obs {
@@ -820,11 +1006,7 @@ np.savetxt(os.environ["UMAPPP_OUT_PATH"], embedding, delimiter=",")
         distances
     }
 
-    fn pairwise_distances_row_major(
-        embedding: &[f64],
-        num_dim: usize,
-        num_obs: usize,
-    ) -> Vec<f64> {
+    fn pairwise_distances_row_major(embedding: &[f64], num_dim: usize, num_obs: usize) -> Vec<f64> {
         let mut distances = Vec::new();
         for i in 0..num_obs {
             for j in (i + 1)..num_obs {
