@@ -19,4 +19,4 @@
 	url = https://github.com/LTLA/CppIrlba
 [submodule "vendor/eigen"]
 	path = vendor/eigen
-	url = https://gitlab.com/libeigen/eigen
+	url = https://github.com/eigen-mirror/eigen
